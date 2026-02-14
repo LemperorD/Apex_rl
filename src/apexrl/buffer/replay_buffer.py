@@ -11,8 +11,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Algorithms module for ApexRL."""
-
-from apexrl.algorithms.ppo import PPO, PPOConfig
-
-__all__ = ["PPO", "PPOConfig"]
