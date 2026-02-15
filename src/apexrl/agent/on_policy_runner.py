@@ -26,9 +26,8 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Type
 
 import torch
 from gymnasium import spaces
-from torch.utils.tensorboard import SummaryWriter
-
 from apexrl.envs.vecenv import VecEnv
+from apexrl.utils.logger import Logger
 
 
 class OnPolicyRunner:
@@ -178,7 +177,18 @@ class OnPolicyRunner:
         if self.save_dir:
             os.makedirs(self.save_dir, exist_ok=True)
 
-        self.writer = SummaryWriter(self.log_dir) if self.log_dir else None
+        # Initialize logger
+        self.logger = None
+        if self.log_dir:
+            # Get logger config from agent's config if available
+            logger_backend = getattr(self.cfg, 'logger_backend', 'tensorboard')
+            logger_kwargs = getattr(self.cfg, 'logger_kwargs', None) or {}
+            self.logger = Logger.create(
+                backend=logger_backend,
+                experiment_name="on_policy_runner",
+                log_dir=self.log_dir,
+                **logger_kwargs
+            )
 
         # Configuration
         self.log_interval = log_interval
@@ -212,9 +222,9 @@ class OnPolicyRunner:
             "post_update": [],
         }
 
-        # Sync agent's writer with runner
-        if hasattr(self.agent, "writer") and self.agent.writer is None:
-            self.agent.writer = self.writer
+        # Sync agent's logger with runner
+        if hasattr(self.agent, "logger") and self.agent.logger is None:
+            self.agent.logger = self.logger
 
     @classmethod
     def register_algorithm(cls, name: str, agent_class: Type, config_class: Type):
@@ -542,8 +552,8 @@ class OnPolicyRunner:
         finally:
             if self.save_dir:
                 self.save_checkpoint("checkpoint_final.pt")
-            if self.writer:
-                self.writer.close()
+            if self.logger:
+                self.logger.close()
 
         print(f"\nTraining complete! Total steps: {self.total_timesteps:,}")
         return {
@@ -617,38 +627,38 @@ class OnPolicyRunner:
             msg += f" | Reward {mean_reward:.2f}"
         print(msg)
 
-        # TensorBoard logging
-        if not self.writer:
+        # Logger logging
+        if not self.logger:
             return
 
         # Time metrics
-        self.writer.add_scalar("time/fps", fps, self.total_timesteps)
-        self.writer.add_scalar("time/iteration", iteration, self.total_timesteps)
+        self.logger.log_scalar("time/fps", fps, self.total_timesteps)
+        self.logger.log_scalar("time/iteration", iteration, self.total_timesteps)
 
         # Rollout stats (vs timesteps)
         for key, value in rollout_stats.items():
-            self.writer.add_scalar(key, value, self.total_timesteps)
+            self.logger.log_scalar(key, value, self.total_timesteps)
 
         # Training stats (vs both timesteps and iteration)
         for key, value in update_stats.items():
-            self.writer.add_scalar(key, value, self.total_timesteps)
+            self.logger.log_scalar(key, value, self.total_timesteps)
             # Also log with iteration for easier analysis
             iter_key = key.replace("train/", "train_vs_iter/")
-            self.writer.add_scalar(iter_key, value, iteration)
+            self.logger.log_scalar(iter_key, value, iteration)
 
         # Distribution stats
         advantages = self.agent.rollout_buffer.advantages
         values = self.agent.rollout_buffer.values
         returns = self.agent.rollout_buffer.returns
 
-        self.writer.add_scalar(
+        self.logger.log_scalar(
             "stats/advantage_mean", advantages.mean().item(), iteration
         )
-        self.writer.add_scalar(
+        self.logger.log_scalar(
             "stats/advantage_std", advantages.std().item(), iteration
         )
-        self.writer.add_scalar("stats/value_mean", values.mean().item(), iteration)
-        self.writer.add_scalar("stats/returns_mean", returns.mean().item(), iteration)
+        self.logger.log_scalar("stats/value_mean", values.mean().item(), iteration)
+        self.logger.log_scalar("stats/returns_mean", returns.mean().item(), iteration)
 
         # Episode stats
         if self.agent.episode_rewards:
@@ -659,16 +669,16 @@ class OnPolicyRunner:
                 self.agent.episode_lengths
             )
 
-            self.writer.add_scalar(
+            self.logger.log_scalar(
                 "episode/mean_reward", mean_reward, self.total_timesteps
             )
-            self.writer.add_scalar(
+            self.logger.log_scalar(
                 "episode/mean_length", mean_length, self.total_timesteps
             )
-            self.writer.add_scalar(
+            self.logger.log_scalar(
                 "episode_vs_iter/mean_reward", mean_reward, iteration
             )
-            self.writer.add_scalar(
+            self.logger.log_scalar(
                 "episode_vs_iter/mean_length", mean_length, iteration
             )
 
@@ -682,13 +692,13 @@ class OnPolicyRunner:
         self._log_environment_metrics()
 
     def _log_reward_components(self) -> None:
-        """Log accumulated reward components to TensorBoard."""
+        """Log accumulated reward components to logger."""
         for key, values in self.reward_components.items():
             if values:
                 mean_val = sum(values) / len(values)
-                # Convert "/reward_component/name" to tensorboard key
-                tb_key = f"reward_components/{key.replace('/reward_component/', '')}"
-                self.writer.add_scalar(tb_key, mean_val, self.iteration)
+                # Convert "/reward_component/name" to logger key
+                log_key = f"reward_components/{key.replace('/reward_component/', '')}"
+                self.logger.log_scalar(log_key, mean_val, self.iteration)
                 values.clear()
 
     def _log_environment_metrics(self) -> None:
@@ -696,9 +706,9 @@ class OnPolicyRunner:
         for key, buffer in self.log_buffers.items():
             if buffer:
                 mean_val = sum(buffer) / len(buffer)
-                # Remove leading "/" for tensorboard key
-                tb_key = key[1:] if key.startswith("/") else key
-                self.writer.add_scalar(f"env/{tb_key}", mean_val, self.iteration)
+                # Remove leading "/" for logger key
+                log_key = key[1:] if key.startswith("/") else key
+                self.logger.log_scalar(f"env/{log_key}", mean_val, self.iteration)
                 buffer.clear()
 
     def save_checkpoint(self, filename: str) -> None:
@@ -727,7 +737,7 @@ class OnPolicyRunner:
 
     def close(self) -> None:
         """Close runner and release resources."""
-        if self.writer:
-            self.writer.close()
+        if self.logger:
+            self.logger.close()
         if hasattr(self.env, "close"):
             self.env.close()
