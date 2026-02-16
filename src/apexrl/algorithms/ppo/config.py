@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -130,6 +130,8 @@ class PPOConfig:
     # Logging
     log_interval: int = 10
     save_interval: int = 100
+    logger_backend: Union[str, List[str]] = "tensorboard"  # "tensorboard", "wandb", "swanlab", or list
+    logger_kwargs: Optional[Dict[str, Any]] = None  # Additional kwargs for logger
 
     # Device
     device: str = "auto"
@@ -151,6 +153,8 @@ class PPOConfig:
         assert self.optimizer in ["adam", "adamw", "muon"], (
             f"optimizer must be one of 'adam', 'adamw', 'muon', got '{self.optimizer}'"
         )
+        if self.logger_kwargs is None:
+            self.logger_kwargs = {}
 
     def get_batch_size(self, num_envs: int) -> int:
         """Get effective batch size."""

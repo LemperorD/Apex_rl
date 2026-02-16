@@ -29,10 +29,10 @@ from typing import Callable, Any, Deque, Dict, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
 from gymnasium import spaces
 
 from apexrl.algorithms.ppo.config import PPOConfig
+from apexrl.utils.logger import Logger
 from apexrl.buffer.rollout_buffer import RolloutBuffer
 from apexrl.envs.vecenv import VecEnv
 from apexrl.models.base import Actor, ContinuousActor, Critic, DiscreteActor
@@ -228,7 +228,14 @@ class PPO:
 
         # Logging
         self.log_dir = log_dir
-        self.writer = SummaryWriter(log_dir) if log_dir else None
+        self.logger = None
+        if log_dir:
+            self.logger = Logger.create(
+                backend=self.cfg.logger_backend,
+                experiment_name="ppo",
+                log_dir=log_dir,
+                **self.cfg.logger_kwargs
+            )
         self.iteration = 0
         self.total_timesteps = 0
 
@@ -699,39 +706,31 @@ class PPO:
                 update_stats.get("train/total_grad_norm", 0)
             )
 
-            # Log additional detailed stats to tensorboard immediately
-            if self.writer and iteration % self.cfg.log_interval == 0:
+            # Log additional detailed stats to logger immediately
+            if self.logger and iteration % self.cfg.log_interval == 0:
                 # Log advantage and value distribution stats
                 advantages = self.rollout_buffer.advantages
                 values = self.rollout_buffer.values
                 returns = self.rollout_buffer.returns
 
-                self.writer.add_scalar(
-                    "advantage/mean", advantages.mean().item(), iteration
-                )
-                self.writer.add_scalar(
-                    "advantage/std", advantages.std().item(), iteration
-                )
-                self.writer.add_scalar(
-                    "advantage/min", advantages.min().item(), iteration
-                )
-                self.writer.add_scalar(
-                    "advantage/max", advantages.max().item(), iteration
-                )
+                self.logger.log_scalar("advantage/mean", advantages.mean().item(), iteration)
+                self.logger.log_scalar("advantage/std", advantages.std().item(), iteration)
+                self.logger.log_scalar("advantage/min", advantages.min().item(), iteration)
+                self.logger.log_scalar("advantage/max", advantages.max().item(), iteration)
 
-                self.writer.add_scalar("value/mean", values.mean().item(), iteration)
-                self.writer.add_scalar("value/std", values.std().item(), iteration)
-                self.writer.add_scalar("value/min", values.min().item(), iteration)
-                self.writer.add_scalar("value/max", values.max().item(), iteration)
+                self.logger.log_scalar("value/mean", values.mean().item(), iteration)
+                self.logger.log_scalar("value/std", values.std().item(), iteration)
+                self.logger.log_scalar("value/min", values.min().item(), iteration)
+                self.logger.log_scalar("value/max", values.max().item(), iteration)
 
-                self.writer.add_scalar("returns/mean", returns.mean().item(), iteration)
-                self.writer.add_scalar("returns/std", returns.std().item(), iteration)
+                self.logger.log_scalar("returns/mean", returns.mean().item(), iteration)
+                self.logger.log_scalar("returns/std", returns.std().item(), iteration)
 
             # Adjust learning rate
             self.adjust_learning_rate(iteration, num_iterations)
 
             # Logging
-            if self.writer and iteration % self.cfg.log_interval == 0:
+            if self.logger and iteration % self.cfg.log_interval == 0:
                 fps = (
                     self.cfg.num_steps
                     * self.num_envs
@@ -740,54 +739,52 @@ class PPO:
                 )
                 start_time = time.time()
 
-                self.writer.add_scalar("time/fps", fps, self.total_timesteps)
-                self.writer.add_scalar(
-                    "time/iterations", iteration, self.total_timesteps
-                )
+                self.logger.log_scalar("time/fps", fps, self.total_timesteps)
+                self.logger.log_scalar("time/iterations", iteration, self.total_timesteps)
 
                 for key, value in rollout_stats.items():
-                    self.writer.add_scalar(key, value, self.total_timesteps)
+                    self.logger.log_scalar(key, value, self.total_timesteps)
 
                 for key, value in update_stats.items():
-                    self.writer.add_scalar(key, value, self.total_timesteps)
+                    self.logger.log_scalar(key, value, self.total_timesteps)
 
                 # Also log with iteration as x-axis for easier analysis
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/policy_loss",
                     update_stats["train/policy_loss"],
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/value_loss",
                     update_stats["train/value_loss"],
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/entropy_loss",
                     update_stats.get("train/entropy_loss", 0),
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/approx_kl",
                     update_stats.get("train/approx_kl", 0),
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/clip_fraction",
                     update_stats.get("train/clip_fraction", 0),
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/actor_grad_norm",
                     update_stats.get("train/actor_grad_norm", 0),
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/critic_grad_norm",
                     update_stats.get("train/critic_grad_norm", 0),
                     iteration,
                 )
-                self.writer.add_scalar(
+                self.logger.log_scalar(
                     "train_vs_iter/total_grad_norm",
                     update_stats.get("train/total_grad_norm", 0),
                     iteration,
@@ -797,17 +794,17 @@ class PPO:
                 if self.episode_rewards:
                     mean_reward = sum(self.episode_rewards) / len(self.episode_rewards)
                     mean_length = sum(self.episode_lengths) / len(self.episode_lengths)
-                    self.writer.add_scalar(
+                    self.logger.log_scalar(
                         "episode/mean_reward", mean_reward, self.total_timesteps
                     )
-                    self.writer.add_scalar(
+                    self.logger.log_scalar(
                         "episode/mean_length", mean_length, self.total_timesteps
                     )
                     # Also log with iteration
-                    self.writer.add_scalar(
+                    self.logger.log_scalar(
                         "episode_vs_iter/mean_reward", mean_reward, iteration
                     )
-                    self.writer.add_scalar(
+                    self.logger.log_scalar(
                         "episode_vs_iter/mean_length", mean_length, iteration
                     )
                     self.episode_rewards.clear()

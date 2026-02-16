@@ -11,4 +11,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utility functions and classes for ApexRL."""
 
+from apexrl.utils.logger import (
+    BaseLogger,
+    Logger,
+    TensorBoardLogger,
+    WandbLogger,
+    SwanLabLogger,
+    MultiLogger,
+    get_logger,
+)
+
+__all__ = [
+    "BaseLogger",
+    "Logger",
+    "TensorBoardLogger",
+    "WandbLogger",
+    "SwanLabLogger",
+    "MultiLogger",
+    "get_logger",
+]
