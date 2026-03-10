@@ -110,7 +110,7 @@ class ReplayBuffer:
         rewards: torch.Tensor,
         next_observations: torch.Tensor,
         dones: torch.Tensor,
-    ):
+    ) -> None:
         """Add a transition to the replay buffer.
 
         Args:
@@ -123,23 +123,95 @@ class ReplayBuffer:
         n = self.num_envs
         start = self.pos
         end = self.pos + n
-        
-        if self.step >= self.num_steps:
-            raise ValueError(f"Rollout buffer is full (capacity: {self.num_steps})")
 
-        self.observations[self.step].copy_(observations)
-        if (
-            self.privileged_observations is not None
-            and privileged_observations is not None
-        ):
-            self.privileged_observations[self.step].copy_(privileged_observations)
-        self.actions[self.step].copy_(actions)
-        self.rewards[self.step].copy_(rewards)
-        self.dones[self.step].copy_(dones)
-        self.values[self.step].copy_(values)
-        self.log_probs[self.step].copy_(log_probs)
+        if end <= self.capacity: 
+            self.observations[start:end] = observations
+            self.actions[start:end] = actions
+            self.rewards[start:end] = rewards
+            self.next_observations[start:end] = next_observations
+            self.dones[start:end] = dones
+            if self.is_priority:
+                self.priorities[start:end] = self.priorities.max() if self.size > 0 else 1.0
+        else:
+            first_part = self.capacity - start
+            second_part = n - first_part
+            self.observations[start:] = observations[:first_part]
+            self.observations[:second_part] = observations[first_part:]
+            self.actions[start:] = actions[:first_part]
+            self.actions[:second_part] = actions[first_part:]
+            self.rewards[start:] = rewards[:first_part]
+            self.rewards[:second_part] = rewards[first_part:]
+            self.next_observations[start:] = next_observations[:first_part]
+            self.next_observations[:second_part] = next_observations[first_part:]
+            self.dones[start:] = dones[:first_part]
+            self.dones[:second_part] = dones[first_part:]
+            if self.is_priority:
+                max_p = self.priorities.max() if self.size > 0 else 1.0
+                self.priorities[start:] = max_p
+                self.priorities[:second_part] = max_p
 
-        self.step += 1
+        # update buffer pointers
+        self.pos = (self.pos + n) % self.capacity
+        self.size = min(self.size + n, self.capacity)
+
+    def sample(self, batch_size: int):
+        """Sample a batch of transitions from the buffer.
+
+        Args:
+            batch_size: Number of samples.
+
+        Returns:
+            Tuple containing:
+                observations
+                actions
+                rewards
+                next_observations
+                dones
+                indices
+                importance sampling weights
+        """
+
+        if self.is_priority:
+            priorities = self.priorities[:self.size] ** self.alpha
+            probs = priorities / priorities.sum()
+
+            indices = torch.multinomial(probs, batch_size, replacement=True)
+
+            weights = (self.size * probs[indices]) ** (-self.beta)
+            weights = weights / weights.max()
+
+            # anneal beta
+            self.beta = min(1.0, self.beta + self.beta_increment)
+
+        else:
+            indices = torch.randint(0, self.size, (batch_size,), device=self.device)
+            weights = torch.ones(batch_size, device=self.device)
+
+        obs = self.observations[indices]
+        actions = self.actions[indices]
+        rewards = self.rewards[indices]
+        next_obs = self.next_observations[indices]
+        dones = self.dones[indices]
+
+        return obs, actions, rewards, next_obs, dones, indices, weights
+    
+    def update_priorities(
+        self,
+        indices: torch.Tensor,
+        td_errors: torch.Tensor,
+    ) -> None:
+        """Update priorities for prioritized replay.
+
+        Args:
+            indices: Indices sampled from the buffer.
+            td_errors: TD errors corresponding to the samples.
+        """
+
+        if not self.is_priority:
+            return
+
+        priorities = torch.abs(td_errors) + self.eps
+        self.priorities[indices] = priorities
 
     def clear(self) -> None:
         """Clear the buffer."""
@@ -153,7 +225,40 @@ class ReplayBuffer:
 
     def __len__(self) -> int:
         """Return the number of transitions stored."""
-        return self.step * self.num_envs
+        return self.size
+    
+    def state_dict(self) -> Dict[str, torch.Tensor]:
+        """Return buffer state."""
+
+        state = {
+            "observations": self.observations,
+            "next_observations": self.next_observations,
+            "actions": self.actions,
+            "rewards": self.rewards,
+            "dones": self.dones,
+            "pos": self.pos,
+            "size": self.size,
+        }
+
+        if self.is_priority:
+            state["priorities"] = self.priorities
+
+        return state
+    
+    def load_state_dict(self, state: Dict[str, torch.Tensor]) -> None:
+        """Load buffer state."""
+
+        self.observations.copy_(state["observations"])
+        self.next_observations.copy_(state["next_observations"])
+        self.actions.copy_(state["actions"])
+        self.rewards.copy_(state["rewards"])
+        self.dones.copy_(state["dones"])
+
+        self.pos = state["pos"]
+        self.size = state["size"]
+
+        if self.is_priority and "priorities" in state:
+            self.priorities.copy_(state["priorities"])
 
     def to(self, device: torch.device) -> "ReplayBuffer":
         """Move all tensors to a new device.
