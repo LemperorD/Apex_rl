@@ -11,97 +11,72 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Replay buffer for Off-policy RL algorithms.
-
-Supports multi-dimensional observations (e.g., images) and flexible storage.
-"""
+"""Replay buffer for off-policy algorithms such as DQN."""
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 
 
 class ReplayBuffer:
-    """Buffer for storing replay data during Off-policy RL training.
-
-    Stores transitions (observations, actions, rewards, dones, values, log_probs)
-    and computes advantages using Generalized Advantage Estimation (GAE).
-
-    Supports multi-dimensional observations (images, vectors, etc.).
-
-    Attributes:
-        num_envs (int): Number of parallel environments.
-        capacity (int): Maximum number of transitions to store in the buffer.
-        obs_shape (tuple): Shape of observations (can be multi-dimensional).
-        action_dim (int): Dimension of the action space.
-        device (torch.device): Device for tensors.
-        is_priority (bool): Whether to use prioritized experience replay.
-        full (bool): Whether the buffer is full.
-    """
+    """Circular replay buffer storing transitions on a single device."""
 
     def __init__(
         self,
-        num_envs: int,
         capacity: int,
         obs_shape: Tuple[int, ...],
-        action_dim: int,
-        device: torch.device,
-        is_priority: bool = False,
+        action_shape: Tuple[int, ...] = (),
+        device: torch.device | str = "cpu",
+        obs_dtype: torch.dtype = torch.float32,
+        action_dtype: torch.dtype = torch.long,
     ):
-        """Initialize the replay buffer.
+        """Initialize replay buffer storage.
 
         Args:
-            num_envs: Number of parallel environments.
-            capacity: Maximum number of transitions to store in the buffer.
-            obs_shape: Shape of observations (e.g., (48,) for vectors, (3, 84, 84) for images).
-            action_dim: Dimension of the action space.
-            device: Device for tensors.
-            is_priority: Whether to use prioritized experience replay.
+            capacity: Maximum number of transitions stored.
+            obs_shape: Observation shape without batch dimension.
+            action_shape: Action shape. Empty tuple means scalar actions.
+            device: Device used for storage and sampling.
+            obs_dtype: Observation dtype.
+            action_dtype: Action dtype.
         """
-        self.num_envs = num_envs
+        if capacity <= 0:
+            raise ValueError(f"capacity must be positive, got {capacity}")
+
         self.capacity = capacity
-        self.obs_shape = obs_shape
-        self.action_dim = action_dim
-        self.device = device
-        self.is_priority = is_priority
+        self.obs_shape = tuple(obs_shape)
+        self.action_shape = tuple(action_shape)
+        self.device = torch.device(device)
+        self.obs_dtype = obs_dtype
+        self.action_dtype = action_dtype
 
-        # Buffers for replay data
-        # Shape: (capacity, *obs_shape)
         self.observations = torch.zeros(
-            (capacity, *obs_shape), device=device, dtype=torch.float32,
+            (capacity, *self.obs_shape),
+            dtype=obs_dtype,
+            device=self.device,
         )
-
-        self.next_observations = torch.zeros(
-            (capacity, *obs_shape), dtype=torch.float32, device=device,
-        )
-
+        self.next_observations = torch.zeros_like(self.observations)
         self.actions = torch.zeros(
-            (capacity, action_dim), dtype=torch.float32, device=device,
+            (capacity, *self.action_shape),
+            dtype=action_dtype,
+            device=self.device,
         )
+        self.rewards = torch.zeros(capacity, dtype=torch.float32, device=self.device)
+        self.dones = torch.zeros(capacity, dtype=torch.float32, device=self.device)
 
-        self.rewards = torch.zeros(
-            capacity, device=device, dtype=torch.float32, 
-        )
-
-        self.dones = torch.zeros(
-            capacity, device=device, dtype=torch.float32, 
-        )
-
-        # Buffer pointer & size
         self.pos = 0
-        self.size = 0
         self.full = False
 
-        if is_priority:
-            self.priorities = torch.zeros(
-                capacity, device=device, dtype=torch.float32,
-            )
-            self.alpha = 0.6
-            self.beta = 0.4
-            self.beta_increment = 1e-4
-            self.eps = 1e-6
+    @property
+    def size(self) -> int:
+        """Return number of valid transitions currently stored."""
+        return self.capacity if self.full else self.pos
+
+    def __len__(self) -> int:
+        """Return number of valid transitions currently stored."""
+        return self.size
 
     def add(
         self,
@@ -111,173 +86,125 @@ class ReplayBuffer:
         next_observations: torch.Tensor,
         dones: torch.Tensor,
     ) -> None:
-        """Add a transition to the replay buffer.
-
-        Args:
-            observations: Observations. Shape: (num_envs, *obs_shape)
-            actions: Actions. Shape: (num_envs, action_dim) or (num_envs,)
-            rewards: Rewards. Shape: (num_envs,)
-            next_observations: Next observations. Shape: (num_envs, *obs_shape)
-            dones: Done flags. Shape: (num_envs,)
-        """
-        n = self.num_envs
-        start = self.pos
-        end = self.pos + n
-
-        if end <= self.capacity: 
-            self.observations[start:end] = observations
-            self.actions[start:end] = actions
-            self.rewards[start:end] = rewards
-            self.next_observations[start:end] = next_observations
-            self.dones[start:end] = dones
-            if self.is_priority:
-                self.priorities[start:end] = self.priorities.max() if self.size > 0 else 1.0
-        else:
-            first_part = self.capacity - start
-            second_part = n - first_part
-            self.observations[start:] = observations[:first_part]
-            self.observations[:second_part] = observations[first_part:]
-            self.actions[start:] = actions[:first_part]
-            self.actions[:second_part] = actions[first_part:]
-            self.rewards[start:] = rewards[:first_part]
-            self.rewards[:second_part] = rewards[first_part:]
-            self.next_observations[start:] = next_observations[:first_part]
-            self.next_observations[:second_part] = next_observations[first_part:]
-            self.dones[start:] = dones[:first_part]
-            self.dones[:second_part] = dones[first_part:]
-            if self.is_priority:
-                max_p = self.priorities.max() if self.size > 0 else 1.0
-                self.priorities[start:] = max_p
-                self.priorities[:second_part] = max_p
-
-        # update buffer pointers
-        self.pos = (self.pos + n) % self.capacity
-        self.size = min(self.size + n, self.capacity)
-
-    def sample(self, batch_size: int):
-        """Sample a batch of transitions from the buffer.
-
-        Args:
-            batch_size: Number of samples.
-
-        Returns:
-            Tuple containing:
-                observations
-                actions
-                rewards
-                next_observations
-                dones
-                indices
-                importance sampling weights
-        """
-
-        if self.is_priority:
-            priorities = self.priorities[:self.size] ** self.alpha
-            probs = priorities / priorities.sum()
-
-            indices = torch.multinomial(probs, batch_size, replacement=True)
-
-            weights = (self.size * probs[indices]) ** (-self.beta)
-            weights = weights / weights.max()
-
-            # anneal beta
-            self.beta = min(1.0, self.beta + self.beta_increment)
-
-        else:
-            indices = torch.randint(0, self.size, (batch_size,), device=self.device)
-            weights = torch.ones(batch_size, device=self.device)
-
-        obs = self.observations[indices]
-        actions = self.actions[indices]
-        rewards = self.rewards[indices]
-        next_obs = self.next_observations[indices]
-        dones = self.dones[indices]
-
-        return obs, actions, rewards, next_obs, dones, indices, weights
-    
-    def update_priorities(
-        self,
-        indices: torch.Tensor,
-        td_errors: torch.Tensor,
-    ) -> None:
-        """Update priorities for prioritized replay.
-
-        Args:
-            indices: Indices sampled from the buffer.
-            td_errors: TD errors corresponding to the samples.
-        """
-
-        if not self.is_priority:
+        """Append a batch of transitions to the replay buffer."""
+        batch_size = observations.shape[0]
+        if batch_size <= 0:
             return
+        if batch_size > self.capacity:
+            raise ValueError(
+                f"batch size {batch_size} exceeds replay capacity {self.capacity}"
+            )
 
-        priorities = torch.abs(td_errors) + self.eps
-        self.priorities[indices] = priorities
+        observations = observations.to(self.device, dtype=self.obs_dtype)
+        next_observations = next_observations.to(self.device, dtype=self.obs_dtype)
+        actions = actions.to(self.device, dtype=self.action_dtype)
+        rewards = rewards.to(self.device, dtype=torch.float32)
+        dones = dones.to(self.device, dtype=torch.float32)
+
+        end = self.pos + batch_size
+        if end <= self.capacity:
+            sl = slice(self.pos, end)
+            self.observations[sl].copy_(observations)
+            self.actions[sl].copy_(actions)
+            self.rewards[sl].copy_(rewards)
+            self.next_observations[sl].copy_(next_observations)
+            self.dones[sl].copy_(dones)
+        else:
+            first = self.capacity - self.pos
+            second = batch_size - first
+            self.observations[self.pos :].copy_(observations[:first])
+            self.actions[self.pos :].copy_(actions[:first])
+            self.rewards[self.pos :].copy_(rewards[:first])
+            self.next_observations[self.pos :].copy_(next_observations[:first])
+            self.dones[self.pos :].copy_(dones[:first])
+
+            self.observations[:second].copy_(observations[first:])
+            self.actions[:second].copy_(actions[first:])
+            self.rewards[:second].copy_(rewards[first:])
+            self.next_observations[:second].copy_(next_observations[first:])
+            self.dones[:second].copy_(dones[first:])
+
+        self.pos = end % self.capacity
+        if batch_size and end >= self.capacity:
+            self.full = True
+
+    def sample(self, batch_size: int) -> Dict[str, torch.Tensor]:
+        """Sample a random batch of transitions."""
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        if self.size < batch_size:
+            raise ValueError(
+                f"cannot sample {batch_size} transitions from buffer of size {self.size}"
+            )
+
+        indices = torch.randint(0, self.size, (batch_size,), device=self.device)
+        batch = {
+            "observations": self.observations[indices],
+            "actions": self.actions[indices],
+            "rewards": self.rewards[indices],
+            "next_observations": self.next_observations[indices],
+            "dones": self.dones[indices],
+        }
+        if not self.action_shape:
+            batch["actions"] = batch["actions"].reshape(batch_size)
+        return batch
 
     def clear(self) -> None:
-        """Clear the buffer."""
-
+        """Reset buffer pointers without reallocating storage."""
         self.pos = 0
-        self.size = 0
         self.full = False
 
-        if self.is_priority:
-            self.priorities.zero_()
-
-    def __len__(self) -> int:
-        """Return the number of transitions stored."""
-        return self.size
-    
-    def state_dict(self) -> Dict[str, torch.Tensor]:
-        """Return buffer state."""
-
-        state = {
-            "observations": self.observations,
-            "next_observations": self.next_observations,
-            "actions": self.actions,
-            "rewards": self.rewards,
-            "dones": self.dones,
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize replay buffer state for checkpointing."""
+        size = self.size
+        return {
+            "capacity": self.capacity,
+            "obs_shape": self.obs_shape,
+            "action_shape": self.action_shape,
+            "obs_dtype": self.obs_dtype,
+            "action_dtype": self.action_dtype,
             "pos": self.pos,
-            "size": self.size,
+            "full": self.full,
+            "size": size,
+            "observations": self.observations[:size].clone(),
+            "actions": self.actions[:size].clone(),
+            "rewards": self.rewards[:size].clone(),
+            "next_observations": self.next_observations[:size].clone(),
+            "dones": self.dones[:size].clone(),
         }
 
-        if self.is_priority:
-            state["priorities"] = self.priorities
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Restore replay buffer state from checkpoint."""
+        size = int(state_dict.get("size", 0))
+        if state_dict["capacity"] != self.capacity:
+            raise ValueError(
+                "ReplayBuffer capacity mismatch: "
+                f"{state_dict['capacity']} != {self.capacity}"
+            )
+        if tuple(state_dict["obs_shape"]) != self.obs_shape:
+            raise ValueError("ReplayBuffer obs_shape mismatch")
+        if tuple(state_dict["action_shape"]) != self.action_shape:
+            raise ValueError("ReplayBuffer action_shape mismatch")
 
-        return state
-    
-    def load_state_dict(self, state: Dict[str, torch.Tensor]) -> None:
-        """Load buffer state."""
+        self.clear()
+        if size > 0:
+            self.observations[:size].copy_(
+                state_dict["observations"].to(self.device, dtype=self.obs_dtype)
+            )
+            self.actions[:size].copy_(
+                state_dict["actions"].to(self.device, dtype=self.action_dtype)
+            )
+            self.rewards[:size].copy_(
+                state_dict["rewards"].to(self.device, dtype=torch.float32)
+            )
+            self.next_observations[:size].copy_(
+                state_dict["next_observations"].to(
+                    self.device, dtype=self.obs_dtype
+                )
+            )
+            self.dones[:size].copy_(
+                state_dict["dones"].to(self.device, dtype=torch.float32)
+            )
 
-        self.observations.copy_(state["observations"])
-        self.next_observations.copy_(state["next_observations"])
-        self.actions.copy_(state["actions"])
-        self.rewards.copy_(state["rewards"])
-        self.dones.copy_(state["dones"])
-
-        self.pos = state["pos"]
-        self.size = state["size"]
-
-        if self.is_priority and "priorities" in state:
-            self.priorities.copy_(state["priorities"])
-
-    def to(self, device: torch.device) -> "ReplayBuffer":
-        """Move all tensors to a new device.
-
-        Args:
-            device: Target device.
-
-        Returns:
-            Self for chaining.
-        """
-        self.device = device
-        self.observations = self.observations.to(device)
-        if self.privileged_observations is not None:
-            self.privileged_observations = self.privileged_observations.to(device)
-        self.actions = self.actions.to(device)
-        self.rewards = self.rewards.to(device)
-        self.dones = self.dones.to(device)
-        self.values = self.values.to(device)
-        self.log_probs = self.log_probs.to(device)
-        self.advantages = self.advantages.to(device)
-        self.returns = self.returns.to(device)
-        return self
+        self.pos = int(state_dict.get("pos", size % self.capacity))
+        self.full = bool(state_dict.get("full", size == self.capacity))

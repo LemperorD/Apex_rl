@@ -43,6 +43,8 @@ class RolloutBuffer:
         num_envs: int,
         num_steps: int,
         obs_shape: Tuple[int, ...],
+        action_shape: Tuple[int, ...],
+        action_dtype: torch.dtype,
         device: torch.device,
         num_privileged_obs: int = 0,
     ):
@@ -52,12 +54,16 @@ class RolloutBuffer:
             num_envs: Number of parallel environments.
             num_steps: Number of steps per rollout (n_steps in PPO).
             obs_shape: Shape of observations (e.g., (48,) for vectors, (3, 84, 84) for images).
+            action_shape: Shape of actions. Empty tuple for scalar discrete actions.
+            action_dtype: Data type used to store actions.
             device: Device for tensors.
             num_privileged_obs: Dimension of privileged observations (for asymmetric critic).
         """
         self.num_envs = num_envs
         self.num_steps = num_steps
         self.obs_shape = obs_shape
+        self.action_shape = action_shape
+        self.action_dtype = action_dtype
         self.device = device
         self.num_privileged_obs = num_privileged_obs
 
@@ -79,10 +85,10 @@ class RolloutBuffer:
         else:
             self.privileged_observations = None
 
-        # Action buffer (supports multi-dimensional actions)
-        # Shape will be determined by action_dim
-        self.actions: torch.Tensor = torch.zeros(
-            num_steps, num_envs, device=device, dtype=torch.float32
+        self.actions = torch.zeros(
+            (num_steps, num_envs, *action_shape),
+            device=device,
+            dtype=action_dtype,
         )
         self.rewards = torch.zeros(
             num_steps, num_envs, device=device, dtype=torch.float32
@@ -121,13 +127,14 @@ class RolloutBuffer:
         """Add a transition to the buffer.
 
         Args:
-            observations: Observations. Shape: (num_envs, *obs_shape)
-            privileged_observations: Privileged observations. Shape: (num_envs, priv_obs_dim) or None
-            actions: Actions. Shape: (num_envs, action_dim) or (num_envs,)
-            rewards: Rewards. Shape: (num_envs,)
-            dones: Done flags. Shape: (num_envs,)
-            values: Value estimates. Shape: (num_envs,)
-            log_probs: Log probabilities of actions. Shape: (num_envs,)
+            observations: Observations with shape ``(num_envs, ...)``.
+            privileged_observations: Privileged observations with shape
+                ``(num_envs, priv_obs_dim)`` or ``None``.
+            actions: Actions with shape ``(num_envs, action_dim)`` or ``(num_envs,)``.
+            rewards: Rewards with shape ``(num_envs,)``.
+            dones: Done flags with shape ``(num_envs,)``.
+            values: Value estimates with shape ``(num_envs,)``.
+            log_probs: Log probabilities of actions with shape ``(num_envs,)``.
         """
         if self.step >= self.num_steps:
             raise ValueError(f"Rollout buffer is full (capacity: {self.num_steps})")
@@ -207,13 +214,9 @@ class RolloutBuffer:
         else:
             flat_privileged_obs = None
 
-        # Flatten other tensors (they have shape (num_steps, num_envs, ...))
-        # Handle actions which might be multi-dimensional
-        if self.actions.dim() > 2:
-            # Multi-dimensional actions: (num_steps, num_envs, action_dim)
-            flat_actions = self.actions.reshape(total_transitions, -1)
+        if self.action_shape:
+            flat_actions = self.actions.reshape(total_transitions, *self.action_shape)
         else:
-            # Single-dimensional actions: (num_steps, num_envs)
             flat_actions = self.actions.reshape(total_transitions)
 
         return {
@@ -237,13 +240,13 @@ class RolloutBuffer:
 
         Returns:
             Tuple containing:
-                - observations: (batch_size, *obs_shape)
-                - privileged_observations: (batch_size, priv_obs_dim) or None
-                - actions: (batch_size,) or (batch_size, action_dim)
-                - old_log_probs: (batch_size,)
-                - advantages: (batch_size,)
-                - returns: (batch_size,)
-                - values: (batch_size,)
+                - observations: ``(batch_size, ...)``
+                - privileged_observations: ``(batch_size, priv_obs_dim)`` or ``None``
+                - actions: ``(batch_size,)`` or ``(batch_size, action_dim)``
+                - old_log_probs: ``(batch_size,)``
+                - advantages: ``(batch_size,)``
+                - returns: ``(batch_size,)``
+                - values: ``(batch_size,)``
         """
         # Get all flattened data
         data = self.get_all_data()
